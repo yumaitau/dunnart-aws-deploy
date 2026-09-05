@@ -17,5 +17,5 @@ jobs:
           terraform_version: '1.15.8'
       - run: terraform -chdir=terraform init -backend=false -input=false
       - run: terraform -chdir=terraform validate
-      - run: python3 -m py_compile scripts/install.py
+      - run: python3 -m py_compile scripts/*.py
       - run: bash -n install.sh

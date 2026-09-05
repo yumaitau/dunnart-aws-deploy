@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Resumable CloudShell deployment. Secrets stay in memory and Secrets Manager."""
-import argparse, base64, datetime, hashlib, hmac, json, os, pathlib, platform, secrets, shutil, subprocess, sys, tempfile, time, urllib.request, urllib.error, uuid, zipfile
+import argparse, base64, datetime, hashlib, hmac, json, os, pathlib, platform, secrets, shutil, subprocess, sys, tempfile, time, urllib.request, urllib.error, urllib.parse, uuid, zipfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REGION = 'ap-southeast-2'
 
@@ -35,11 +35,10 @@ def terraform():
     (target / 'terraform').chmod(0o700)
     return str(target / 'terraform')
 
-def check_license(release, installation, account):
+def signed_request(release, path, payload):
     credentials = json.loads(subprocess.check_output(['aws','configure','export-credentials','--format','process'], text=True))
-    nonce = str(uuid.uuid4())
-    body = json.dumps({'installation':installation,'nonce':nonce}, separators=(',',':')).encode()
-    url = urllib.parse.urlsplit(release['licenseUrl']+'/lease')
+    body = json.dumps(payload, separators=(',',':')).encode()
+    url = urllib.parse.urlsplit(release['licenseUrl']+path)
     now = datetime.datetime.now(datetime.timezone.utc)
     stamp, day = now.strftime('%Y%m%dT%H%M%SZ'), now.strftime('%Y%m%d')
     headers = {'content-type':'application/json','host':url.netloc,'x-amz-date':stamp}
@@ -54,10 +53,15 @@ def check_license(release, installation, account):
     signature = hmac.new(key,to_sign.encode(),hashlib.sha256).hexdigest()
     headers['Authorization'] = f"AWS4-HMAC-SHA256 Credential={credentials['AccessKeyId']}/{scope}, SignedHeaders={names}, Signature={signature}"
     try:
-        request=urllib.request.Request(release['licenseUrl']+'/lease', data=body, headers=headers, method='POST')
+        request=urllib.request.Request(release['licenseUrl']+path, data=body, headers=headers, method='POST')
         with urllib.request.urlopen(request,timeout=30) as response: signed=json.load(response)
     except urllib.error.HTTPError as error:
-        raise RuntimeError(f'Marketplace licence check failed ({error.code}). Complete registration and use the subscribed AWS account before deploying.') from None
+        raise RuntimeError(f'KISS Company setup request failed ({error.code}). Check the subscription or contact Yuma support.') from None
+    return signed
+
+def check_license(release, installation, account):
+    nonce=str(uuid.uuid4())
+    signed=signed_request(release,'/lease',{'installation':installation,'nonce':nonce})
     with tempfile.TemporaryDirectory() as directory:
         directory=pathlib.Path(directory)
         (directory/'key.pem').write_text(release['publicKey'])
@@ -73,6 +77,8 @@ def check_license(release, installation, account):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plan', action='store_true', help='Prepare state and show infrastructure plan only')
+    parser.add_argument('--automated', action='store_true', help='Run behind the guided launch page; never print owner secrets')
+    parser.add_argument('--advanced-byo-connections', action='store_true', help='Advanced: supply a dedicated Composio key later')
     args = parser.parse_args()
     release = json.loads((ROOT / 'release.json').read_text())
     image = release.get('image', '')
@@ -87,11 +93,33 @@ def main():
         if config['buyer_account'] != account:
             raise RuntimeError('This checkout belongs to another AWS account; use a fresh checkout.')
     else:
-        config = {'region':REGION, 'buyer_account':account, 'installation_id':str(uuid.uuid4()), 'name':'kiss-company', 'enable_service':False}
-    config.update(container_image=image, license_invoke_arn=release['licenseInvokeArn'])
-    config_file.write_text(json.dumps(config, indent=2)+'\n'); config_file.chmod(0o600)
-    if not args.plan: check_license(release,config['installation_id'],account)
+        config = {'region':REGION, 'buyer_account':account, 'installation_id':os.environ.get('KISS_INSTALLATION_ID') or str(uuid.uuid4()), 'name':'kiss-company', 'enable_service':False}
     bucket = f'kiss-company-state-{account}-{REGION}'
+    # Recover persisted identity before requesting a lease or changing infrastructure.
+    try:
+        aws('s3api','head-bucket',{'Bucket':bucket, 'ExpectedBucketOwner':account})
+        existing=aws('s3api','list-objects-v2',{'Bucket':bucket,'Prefix':'company/installation.json','MaxKeys':1})
+    except RuntimeError:
+        existing={}
+    if any(item['Key']=='company/installation.json' for item in existing.get('Contents',[])):
+        subprocess.check_call(['aws','s3','cp',f's3://{bucket}/company/installation.json',str(config_file),'--only-show-errors'])
+        saved=json.loads(config_file.read_text())
+        requested=os.environ.get('KISS_INSTALLATION_ID')
+        if saved['buyer_account']!=account or (requested and saved['installation_id']!=requested):
+            raise RuntimeError('Existing company has a different installation identity')
+        config=saved
+    config.update(container_image=image, license_invoke_arn=release['licenseInvokeArn'])
+    if args.automated and not os.environ.get('OWNER_CLAIM_HASH'): raise RuntimeError('Owner browser setup missing')
+    config_file.write_text(json.dumps(config, indent=2)+'\n'); config_file.chmod(0o600)
+    connector_key=''
+    if not args.plan:
+        check_license(release,config['installation_id'],account)
+        if not args.advanced_byo_connections:
+            connector_key=signed_request(release,'/connector-project',{'installation':config['installation_id']})['api_key']
+    def progress(phase,url=None):
+        if args.automated:
+            signed_request(release,'/deployment-status',{'installation':config['installation_id'],'phase':phase,**({'workspace_url':url} if url else {})})
+    progress('preparing')
     try:
         aws('s3api','head-bucket',{'Bucket':bucket, 'ExpectedBucketOwner':account})
     except RuntimeError:
@@ -99,18 +127,29 @@ def main():
     aws('s3api','put-public-access-block',{'Bucket':bucket,'PublicAccessBlockConfiguration':dict.fromkeys(['BlockPublicAcls','IgnorePublicAcls','BlockPublicPolicy','RestrictPublicBuckets'], True)})
     aws('s3api','put-bucket-versioning',{'Bucket':bucket,'VersioningConfiguration':{'Status':'Enabled'}})
     aws('s3api','put-bucket-encryption',{'Bucket':bucket,'ServerSideEncryptionConfiguration':{'Rules':[{'ApplyServerSideEncryptionByDefault':{'SSEAlgorithm':'AES256'}}]}})
+    def save_config():
+        config_file.write_text(json.dumps(config,indent=2)+'\n')
+        subprocess.check_call(['aws','s3','cp',str(config_file),f's3://{bucket}/company/installation.json','--only-show-errors'])
+    save_config()
     executable = terraform()
     def tf(*arguments, capture=False):
         return subprocess.check_output([executable, f'-chdir={ROOT / "terraform"}', *arguments], text=True) if capture else subprocess.check_call([executable, f'-chdir={ROOT / "terraform"}', *arguments])
     tf('init','-input=false',f'-backend-config=bucket={bucket}', '-backend-config=key=company/terraform.tfstate',f'-backend-config=region={REGION}','-backend-config=encrypt=true','-backend-config=use_lockfile=true')
     if args.plan:
         tf('plan','-input=false'); return
+    progress('installing')
     tf('apply','-auto-approve','-input=false')
     outputs = {key:value['value'] for key,value in json.loads(tf('output','-json',capture=True)).items()}
     secret = aws('secretsmanager','describe-secret',{'SecretId':outputs['runtime_secret_arn']})
     if not any('AWSCURRENT' in stages for stages in secret.get('VersionIdsToStages',{}).values()):
         values = {key:base64.b64encode(secrets.token_bytes(32)).decode() for key in ['BETTER_AUTH_SECRET','APP_ENCRYPTION_KEY','HERMES_MANAGER_TOKEN']}
+        values['COMPOSIO_API_KEY']=connector_key
         aws('secretsmanager','put-secret-value',{'SecretId':outputs['runtime_secret_arn'],'SecretString':json.dumps(values)})
+    elif connector_key:
+        values=json.loads(aws('secretsmanager','get-secret-value',{'SecretId':outputs['runtime_secret_arn']})['SecretString'])
+        if not values.get('COMPOSIO_API_KEY'):
+            values['COMPOSIO_API_KEY']=connector_key
+            aws('secretsmanager','put-secret-value',{'SecretId':outputs['runtime_secret_arn'],'SecretString':json.dumps(values)})
     network = {'awsvpcConfiguration':{'subnets':outputs['subnets'],'securityGroups':[outputs['security_group']],'assignPublicIp':'DISABLED'}}
     # Use a dedicated one-container task, preventing a worker from starting before migrations.
     original = aws('ecs','describe-task-definition',{'taskDefinition':outputs['task_definition']})['taskDefinition']
@@ -119,6 +158,8 @@ def main():
     setup['family'] = config['name']+'-setup'
     web = next(c for c in original['containerDefinitions'] if c['name']=='web')
     web['command'] = ['node','dist/migrate.js']; web.pop('portMappings',None)
+    if os.environ.get('OWNER_CLAIM_HASH'):
+        web['environment'].append({'name':'OWNER_CLAIM_HASH','value':os.environ['OWNER_CLAIM_HASH']})
     setup['containerDefinitions'] = [web]
     migration = aws('ecs','register-task-definition',setup)['taskDefinition']['taskDefinitionArn']
     def job(command):
@@ -135,10 +176,13 @@ def main():
             time.sleep(5)
         raise RuntimeError(f'Setup task timed out: {task}')
     job(['node','dist/migrate.js'])
+    progress('connecting')
+    job(['node','dist/setup-integrations.js'])
     if not config['enable_service']:
         job(['node','dist/bootstrap.js'])
     config['enable_service']=True
-    config_file.write_text(json.dumps(config,indent=2)+'\n')
+    save_config()
+    progress('starting')
     tf('apply','-auto-approve','-input=false')
     deadline=time.monotonic()+900
     while time.monotonic()<deadline:
@@ -148,7 +192,11 @@ def main():
         except Exception: pass
         time.sleep(5)
     else: raise RuntimeError('HTTPS health did not become ready. Rerun after checking ECS events.')
+    progress('ready',outputs['url'])
     print('\nCompany ready: '+outputs['url'])
+    (ROOT / '.kiss-result.json').write_text(json.dumps({'url':outputs['url']}))
+    if args.automated:
+        print('Return to your KISS Company setup page to finish.'); return
     try:
         claim=json.loads(aws('secretsmanager','get-secret-value',{'SecretId':outputs['claim_secret_arn']})['SecretString'])
         print('Private owner claim link (30-minute expiry; do not share):\n'+claim['url'])

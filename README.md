@@ -2,22 +2,28 @@
 
 One company workspace, licensed through an AWS Marketplace SaaS contract. Yuma operates the small licensing service; your application, database and Hermes profiles run in your AWS account.
 
-**Pilot status:** source and installer are under validation. No installable release is published until its image digest and buyer entitlement flow have been verified. Do not treat a source checkout as a production release.
+**Pilot status:** a pinned pilot image and guided installer are published for validation. The buyer entitlement and deployment flow still need live proof. Do not treat a source checkout as a production release.
 
 ## Getting started
 
-1. Accept your private Marketplace offer and choose **Set up your account**. Complete registration in the Yuma licensing service.
-2. Open AWS CloudShell in the **subscribing account**, in **Sydney (`ap-southeast-2`)**.
-3. Run the versioned command supplied with your release. The deployment prepares a generated HTTPS address and prints a private, expiring owner claim link.
-4. Claim the owner account. Add a **dedicated Composio project key** in Settings, connect your own apps and invite teammates.
+1. Subscribe through AWS Marketplace and choose **Set up your account**.
+2. On the KISS Company setup page, choose **Launch my workspace**. AWS opens with everything filled in. Approve the installer permissions in the subscribing account.
+3. Return to the setup page. It shows actual deployment progress and opens your workspace when ready.
+4. Create your owner account, choose Gmail or Outlook, approve access and start chatting. No domain or Composio API key needed.
 
-The release command downloads a tagged checkout and runs `./install.sh`. This repository intentionally does not advertise a working release tag before validation. To review infrastructure first, run `./install.sh --plan` from a published release. Planning prepares the encrypted, versioned S3 state bucket but does not create the application stack.
+The private owner link stays in the browser where you started. Keep that browser tab available until you create your account. It expires after 24 hours. Contact Yuma support if setup needs recovery.
 
-Run the same checkout again to resume a failed installation. Keep `terraform/installation.auto.tfvars.json`: it holds your non-secret installation identity. Do not invent a new ID when recovering an existing licensed workspace.
+The CloudFormation stack starts a buyer-owned CodeBuild installer. **Stack completion means the installer started; the KISS setup page confirms when the workspace is ready.** The installer runs Terraform from an immutable deployment commit. Company resources and data are managed by Terraform separately: deleting the launcher does not remove them or stop their charges. Do not delete the launcher while its build is running.
+
+### Advanced: command-line setup
+
+The versioned release command runs `./install.sh` in AWS CloudShell in Sydney (`ap-southeast-2`). A supported release will be advertised after buyer validation; source checkouts are not a release. `./install.sh --plan` reviews infrastructure and prepares the state bucket. `--advanced-byo-connections` lets an experienced owner configure a dedicated Composio project later.
+
+Rerunning resumes the installation using its identity and service state from encrypted buyer S3. Runtime secrets remain in Secrets Manager. Do not invent a new installation ID to recover an existing licensed workspace.
 
 ## Data and licensing
 
-- Seller: subscription registration, verified buyer AWS account, registration email, installation binding and entitlement expiry. No chats, mailbox content, tasks or Composio credentials.
+- Seller: subscription registration, verified buyer AWS account, registration email, installation binding, setup progress and entitlement expiry. Seller provisions an isolated Composio project and retains its project key in Secrets Manager. The buyer receives only its own project key. Chat and connected-app traffic are not proxied through the seller setup service.
 - Buyer: ECS Fargate web/worker/Hermes service, encrypted PostgreSQL RDS, EFS profiles, Secrets Manager and CloudWatch logs.
 - Composio and your selected model provider process the connected content needed for your requests. Personal connections, conversations and accepted learning are user-scoped; work is shared only when explicitly selected.
 - The task IAM role signs lease requests. Seller checks `GetEntitlements` and signs a short-lived response. Application verifies the embedded public key, product, installation, nonce and expiry. Seller credentials never enter buyer containers.
@@ -30,7 +36,7 @@ The public deployment source and public image do not replace the software licenc
 
 Pilot uses one ARM64 ECS task (1 vCPU, 4 GiB), three containers, single-AZ RDS PostgreSQL, EFS, one NAT gateway and a private ALB behind CloudFront VPC origin. This is a small deployment, not a high-availability configuration. Upgrades restart the service and briefly interrupt chat. Use Sydney; the default Bedrock inference profile can process in Sydney and Melbourne.
 
-Marketplace licence, AWS infrastructure, Bedrock usage and Composio charges are separate. NAT, ALB and RDS accrue charges even while nobody is chatting. Review the Terraform plan and your AWS cost estimate before deployment. Model access/Anthropic use-case prerequisites must be completed in your AWS account.
+AWS infrastructure and Bedrock usage are separate from the Marketplace licence. Managed connection allowances are specified in the offer; advanced BYO Composio usage is billed through your own account. NAT, ALB and RDS accrue charges even while nobody is chatting. Review the Terraform plan and your AWS cost estimate before deployment. Model access/Anthropic use-case prerequisites must be completed in your AWS account.
 
 ## Operations and recovery
 
