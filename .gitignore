@@ -1,0 +1,9 @@
+.terraform/
+*.tfstate*
+*.tfplan
+*.tfvars
+.kiss/
+
+*.auto.tfvars.json
+.tools/
+__pycache__/

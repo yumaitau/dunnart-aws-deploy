@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "productCode": "eq90c6owahlofdrwqs2omlm5v",
+  "licenseUrl": "https://vspvcb1ld4.execute-api.us-east-1.amazonaws.com/v1",
+  "licenseRegion": "us-east-1",
+  "image": "",
+  "licenseInvokeArn": "arn:aws:execute-api:us-east-1:959038055523:vspvcb1ld4/v1/POST/lease",
+  "status": "pilot-validation-pending",
+  "publicKey": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApx+cdPgc3lp8qxn6zASW\nYNeGUs2amqGNMiJwLYkRAMry0Qk5CyXmbYykmd76dc6uRhtnhzwxLAvvdTZzXP3t\n9BwXOrsWyIetEw+EyFvI6jflWd5LHQD93kwtrtts4by7duJxA8Yd+6fn7lqA+yPX\n9pd4sa3uDSqmDPraNyV3p0H1MeT8mUypFS4oPZUE0DCckRdmRI2UB6+0wgm6lbeN\nP0sKGPJ4YOhVaiI/ome9ZGVe8R4dwFgMkEWVidSne69n6uwWkNUmbqqo2cv7V8Z9\naUbhkC1SkSOVNh5uNwBtJNumJTXUcc19ihuvMUHnQ+9Iw8kpm+St3UbIybu2GOVy\nmQIDAQAB\n-----END PUBLIC KEY-----\n"
+}

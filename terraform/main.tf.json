@@ -1,0 +1,586 @@
+{
+  "terraform": {
+    "required_version": ">= 1.10",
+    "required_providers": {
+      "aws": {
+        "source": "hashicorp/aws",
+        "version": "~> 6.0"
+      }
+    },
+    "backend": {
+      "s3": {}
+    }
+  },
+  "provider": {
+    "aws": {
+      "region": "${var.region}",
+      "allowed_account_ids": [
+        "${var.buyer_account}"
+      ]
+    }
+  },
+  "variable": {
+    "region": {
+      "type": "string",
+      "default": "ap-southeast-2",
+      "validation": {
+        "condition": "${var.region == \"ap-southeast-2\"}",
+        "error_message": "Pilot release supports Sydney only."
+      }
+    },
+    "name": {
+      "type": "string",
+      "default": "kiss-company"
+    },
+    "container_image": {
+      "type": "string",
+      "validation": {
+        "condition": "${can(regex(\"^public[.]ecr[.]aws/.+@sha256:[a-f0-9]{64}$\", var.container_image))}",
+        "error_message": "Use a verified immutable public ECR image digest."
+      }
+    },
+    "installation_id": {
+      "type": "string"
+    },
+    "license_invoke_arn": {
+      "type": "string"
+    },
+    "enable_service": {
+      "type": "bool",
+      "default": false
+    },
+    "buyer_account": {
+      "type": "string"
+    }
+  },
+  "data": {
+    "aws_caller_identity": {
+      "buyer": {}
+    },
+    "aws_availability_zones": {
+      "available": {
+        "state": "available"
+      }
+    },
+    "aws_ec2_managed_prefix_list": {
+      "cloudfront": {
+        "name": "com.amazonaws.global.cloudfront.origin-facing"
+      }
+    },
+    "aws_cloudfront_cache_policy": {
+      "disabled": {
+        "name": "Managed-CachingDisabled"
+      }
+    },
+    "aws_cloudfront_origin_request_policy": {
+      "viewer": {
+        "name": "Managed-AllViewer"
+      }
+    }
+  },
+  "resource": {
+    "aws_vpc": {
+      "app": {
+        "cidr_block": "10.87.0.0/16",
+        "enable_dns_hostnames": true,
+        "enable_dns_support": true,
+        "tags": {
+          "Name": "${var.name}"
+        }
+      }
+    },
+    "aws_internet_gateway": {
+      "app": {
+        "vpc_id": "${aws_vpc.app.id}"
+      }
+    },
+    "aws_subnet": {
+      "public": {
+        "count": 2,
+        "vpc_id": "${aws_vpc.app.id}",
+        "cidr_block": "${cidrsubnet(aws_vpc.app.cidr_block, 8, count.index + 0)}",
+        "availability_zone": "${data.aws_availability_zones.available.names[count.index]}",
+        "map_public_ip_on_launch": false
+      },
+      "private": {
+        "count": 2,
+        "vpc_id": "${aws_vpc.app.id}",
+        "cidr_block": "${cidrsubnet(aws_vpc.app.cidr_block, 8, count.index + 10)}",
+        "availability_zone": "${data.aws_availability_zones.available.names[count.index]}",
+        "map_public_ip_on_launch": false
+      }
+    },
+    "aws_eip": {
+      "nat": {
+        "domain": "vpc"
+      }
+    },
+    "aws_nat_gateway": {
+      "app": {
+        "allocation_id": "${aws_eip.nat.id}",
+        "subnet_id": "${aws_subnet.public[0].id}",
+        "depends_on": [
+          "aws_internet_gateway.app"
+        ]
+      }
+    },
+    "aws_route_table": {
+      "public": {
+        "vpc_id": "${aws_vpc.app.id}"
+      },
+      "private": {
+        "vpc_id": "${aws_vpc.app.id}"
+      }
+    },
+    "aws_route_table_association": {
+      "public": {
+        "count": 2,
+        "subnet_id": "${aws_subnet.public[count.index].id}",
+        "route_table_id": "${aws_route_table.public.id}"
+      },
+      "private": {
+        "count": 2,
+        "subnet_id": "${aws_subnet.private[count.index].id}",
+        "route_table_id": "${aws_route_table.private.id}"
+      }
+    },
+    "aws_security_group": {
+      "web": {
+        "name_prefix": "${var.name}-web-",
+        "description": "KISS Company web boundary",
+        "vpc_id": "${aws_vpc.app.id}"
+      },
+      "alb": {
+        "name_prefix": "${var.name}-alb-",
+        "description": "KISS Company alb boundary",
+        "vpc_id": "${aws_vpc.app.id}"
+      },
+      "db": {
+        "name_prefix": "${var.name}-db-",
+        "description": "KISS Company db boundary",
+        "vpc_id": "${aws_vpc.app.id}"
+      },
+      "efs": {
+        "name_prefix": "${var.name}-efs-",
+        "description": "KISS Company efs boundary",
+        "vpc_id": "${aws_vpc.app.id}"
+      }
+    },
+    "aws_vpc_security_group_ingress_rule": {
+      "cloudfront": {
+        "security_group_id": "${aws_security_group.alb.id}",
+        "prefix_list_id": "${data.aws_ec2_managed_prefix_list.cloudfront.id}",
+        "from_port": 80,
+        "to_port": 80,
+        "ip_protocol": "tcp",
+        "description": "CloudFront origin traffic only"
+      },
+      "web": {
+        "security_group_id": "${aws_security_group.web.id}",
+        "referenced_security_group_id": "${aws_security_group.alb.id}",
+        "from_port": 3000,
+        "to_port": 3000,
+        "ip_protocol": "tcp",
+        "description": "KISS internal web"
+      },
+      "db": {
+        "security_group_id": "${aws_security_group.db.id}",
+        "referenced_security_group_id": "${aws_security_group.web.id}",
+        "from_port": 5432,
+        "to_port": 5432,
+        "ip_protocol": "tcp",
+        "description": "KISS internal db"
+      },
+      "efs": {
+        "security_group_id": "${aws_security_group.efs.id}",
+        "referenced_security_group_id": "${aws_security_group.web.id}",
+        "from_port": 2049,
+        "to_port": 2049,
+        "ip_protocol": "tcp",
+        "description": "KISS internal efs"
+      }
+    },
+    "aws_vpc_security_group_egress_rule": {
+      "web": {
+        "security_group_id": "${aws_security_group.alb.id}",
+        "referenced_security_group_id": "${aws_security_group.web.id}",
+        "from_port": 3000,
+        "to_port": 3000,
+        "ip_protocol": "tcp",
+        "description": "KISS internal web"
+      },
+      "db": {
+        "security_group_id": "${aws_security_group.web.id}",
+        "referenced_security_group_id": "${aws_security_group.db.id}",
+        "from_port": 5432,
+        "to_port": 5432,
+        "ip_protocol": "tcp",
+        "description": "KISS internal db"
+      },
+      "efs": {
+        "security_group_id": "${aws_security_group.web.id}",
+        "referenced_security_group_id": "${aws_security_group.efs.id}",
+        "from_port": 2049,
+        "to_port": 2049,
+        "ip_protocol": "tcp",
+        "description": "KISS internal efs"
+      },
+      "https": {
+        "security_group_id": "${aws_security_group.web.id}",
+        "cidr_ipv4": "0.0.0.0/0",
+        "from_port": 443,
+        "to_port": 443,
+        "ip_protocol": "tcp",
+        "description": "Composio, AWS APIs and image downloads"
+      }
+    },
+    "aws_db_subnet_group": {
+      "app": {
+        "name": "${var.name}",
+        "subnet_ids": "${aws_subnet.private[*].id}"
+      }
+    },
+    "aws_db_instance": {
+      "app": {
+        "identifier": "${var.name}",
+        "engine": "postgres",
+        "engine_version": "17",
+        "instance_class": "db.t4g.micro",
+        "allocated_storage": 20,
+        "max_allocated_storage": 100,
+        "storage_type": "gp3",
+        "storage_encrypted": true,
+        "db_name": "kiss",
+        "username": "kiss",
+        "manage_master_user_password": true,
+        "db_subnet_group_name": "${aws_db_subnet_group.app.name}",
+        "vpc_security_group_ids": [
+          "${aws_security_group.db.id}"
+        ],
+        "publicly_accessible": false,
+        "multi_az": false,
+        "backup_retention_period": 7,
+        "deletion_protection": true,
+        "skip_final_snapshot": false,
+        "final_snapshot_identifier": "${var.name}-final-${var.installation_id}",
+        "enabled_cloudwatch_logs_exports": [
+          "postgresql",
+          "upgrade"
+        ],
+        "auto_minor_version_upgrade": true
+      }
+    },
+    "aws_efs_file_system": {
+      "profiles": {
+        "creation_token": "${var.installation_id}",
+        "encrypted": true
+      }
+    },
+    "aws_efs_access_point": {
+      "profiles": {
+        "file_system_id": "${aws_efs_file_system.profiles.id}",
+        "posix_user": {
+          "uid": 10000,
+          "gid": 10000
+        },
+        "root_directory": {
+          "path": "/profiles",
+          "creation_info": {
+            "owner_uid": 10000,
+            "owner_gid": 10000,
+            "permissions": "0700"
+          }
+        }
+      }
+    },
+    "aws_efs_mount_target": {
+      "profiles": {
+        "count": 2,
+        "file_system_id": "${aws_efs_file_system.profiles.id}",
+        "subnet_id": "${aws_subnet.private[count.index].id}",
+        "security_groups": [
+          "${aws_security_group.efs.id}"
+        ]
+      }
+    },
+    "aws_efs_backup_policy": {
+      "profiles": {
+        "file_system_id": "${aws_efs_file_system.profiles.id}",
+        "backup_policy": {
+          "status": "ENABLED"
+        }
+      }
+    },
+    "aws_secretsmanager_secret": {
+      "runtime": {
+        "name": "${var.name}/runtime",
+        "recovery_window_in_days": 30,
+        "description": "KISS runtime secret; values generated outside Terraform"
+      },
+      "claim": {
+        "name": "${var.name}/claim",
+        "recovery_window_in_days": 30,
+        "description": "KISS claim secret; values generated outside Terraform"
+      }
+    },
+    "aws_cloudwatch_log_group": {
+      "app": {
+        "name": "/ecs/${var.name}",
+        "retention_in_days": 30
+      }
+    },
+    "aws_iam_role": {
+      "task": {
+        "name_prefix": "${var.name}-task-",
+        "assume_role_policy": "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Principal\": {\"Service\": \"ecs-tasks.amazonaws.com\"}, \"Action\": \"sts:AssumeRole\"}]}"
+      },
+      "execution": {
+        "name_prefix": "${var.name}-execution-",
+        "assume_role_policy": "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Principal\": {\"Service\": \"ecs-tasks.amazonaws.com\"}, \"Action\": \"sts:AssumeRole\"}]}"
+      }
+    },
+    "aws_iam_role_policy_attachment": {
+      "execution": {
+        "role": "${aws_iam_role.execution.name}",
+        "policy_arn": "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      }
+    },
+    "aws_iam_role_policy": {
+      "execution": {
+        "role": "${aws_iam_role.execution.id}",
+        "policy": "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Action\": [\"secretsmanager:GetSecretValue\"], \"Resource\": [\"${aws_secretsmanager_secret.runtime.arn}\", \"${aws_db_instance.app.master_user_secret[0].secret_arn}\"]}]}"
+      },
+      "task": {
+        "role": "${aws_iam_role.task.id}",
+        "policy": "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Action\": [\"execute-api:Invoke\"], \"Resource\": \"${var.license_invoke_arn}\"}, {\"Effect\": \"Allow\", \"Action\": [\"bedrock:InvokeModel\", \"bedrock:InvokeModelWithResponseStream\"], \"Resource\": [\"arn:aws:bedrock:ap-southeast-2:${data.aws_caller_identity.buyer.account_id}:inference-profile/au.anthropic.claude-sonnet-4-6\", \"arn:aws:bedrock:ap-southeast-2::foundation-model/anthropic.claude-sonnet-4-6\", \"arn:aws:bedrock:ap-southeast-4::foundation-model/anthropic.claude-sonnet-4-6\"]}, {\"Effect\": \"Allow\", \"Action\": [\"elasticfilesystem:ClientMount\", \"elasticfilesystem:ClientWrite\"], \"Resource\": \"${aws_efs_file_system.profiles.arn}\", \"Condition\": {\"StringEquals\": {\"elasticfilesystem:AccessPointArn\": \"${aws_efs_access_point.profiles.arn}\"}}}, {\"Effect\": \"Allow\", \"Action\": [\"secretsmanager:PutSecretValue\"], \"Resource\": \"${aws_secretsmanager_secret.claim.arn}\"}]}"
+      }
+    },
+    "aws_lb": {
+      "app": {
+        "name": "${var.name}",
+        "internal": true,
+        "load_balancer_type": "application",
+        "security_groups": [
+          "${aws_security_group.alb.id}"
+        ],
+        "subnets": "${aws_subnet.private[*].id}",
+        "drop_invalid_header_fields": true
+      }
+    },
+    "aws_lb_target_group": {
+      "app": {
+        "name": "${var.name}",
+        "port": 3000,
+        "protocol": "HTTP",
+        "target_type": "ip",
+        "vpc_id": "${aws_vpc.app.id}",
+        "health_check": {
+          "path": "/api/health",
+          "healthy_threshold": 2,
+          "unhealthy_threshold": 3,
+          "interval": 30
+        },
+        "deregistration_delay": 30
+      }
+    },
+    "aws_lb_listener": {
+      "app": {
+        "load_balancer_arn": "${aws_lb.app.arn}",
+        "port": 80,
+        "protocol": "HTTP",
+        "default_action": {
+          "type": "forward",
+          "target_group_arn": "${aws_lb_target_group.app.arn}"
+        }
+      }
+    },
+    "aws_cloudfront_vpc_origin": {
+      "app": {
+        "vpc_origin_endpoint_config": {
+          "name": "${var.name}",
+          "arn": "${aws_lb.app.arn}",
+          "http_port": 80,
+          "https_port": 443,
+          "origin_protocol_policy": "http-only",
+          "origin_ssl_protocols": {
+            "items": [
+              "TLSv1.2"
+            ],
+            "quantity": 1
+          }
+        },
+        "depends_on": [
+          "aws_lb_listener.app"
+        ]
+      }
+    },
+    "aws_cloudfront_distribution": {
+      "app": {
+        "enabled": true,
+        "comment": "KISS Company buyer workspace",
+        "price_class": "PriceClass_All",
+        "origin": [
+          {
+            "domain_name": "${aws_lb.app.dns_name}",
+            "origin_id": "app",
+            "vpc_origin_config": {
+              "vpc_origin_id": "${aws_cloudfront_vpc_origin.app.id}",
+              "origin_read_timeout": 60,
+              "origin_keepalive_timeout": 5
+            }
+          }
+        ],
+        "default_cache_behavior": {
+          "target_origin_id": "app",
+          "viewer_protocol_policy": "redirect-to-https",
+          "allowed_methods": [
+            "GET",
+            "HEAD",
+            "OPTIONS",
+            "PUT",
+            "PATCH",
+            "POST",
+            "DELETE"
+          ],
+          "cached_methods": [
+            "GET",
+            "HEAD"
+          ],
+          "cache_policy_id": "${data.aws_cloudfront_cache_policy.disabled.id}",
+          "origin_request_policy_id": "${data.aws_cloudfront_origin_request_policy.viewer.id}",
+          "compress": false
+        },
+        "restrictions": {
+          "geo_restriction": {
+            "restriction_type": "none"
+          }
+        },
+        "viewer_certificate": {
+          "cloudfront_default_certificate": true
+        }
+      }
+    },
+    "aws_ecs_cluster": {
+      "app": {
+        "name": "${var.name}",
+        "setting": [
+          {
+            "name": "containerInsights",
+            "value": "enabled"
+          }
+        ]
+      }
+    },
+    "aws_ecs_task_definition": {
+      "app": {
+        "family": "${var.name}",
+        "requires_compatibilities": [
+          "FARGATE"
+        ],
+        "network_mode": "awsvpc",
+        "cpu": "1024",
+        "memory": "4096",
+        "execution_role_arn": "${aws_iam_role.execution.arn}",
+        "task_role_arn": "${aws_iam_role.task.arn}",
+        "runtime_platform": {
+          "cpu_architecture": "ARM64",
+          "operating_system_family": "LINUX"
+        },
+        "container_definitions": "[{\"name\": \"web\", \"image\": \"${var.container_image}\", \"essential\": true, \"command\": [\"node\", \"server.js\"], \"user\": \"10000:10000\", \"readonlyRootFilesystem\": true, \"environment\": [{\"name\": \"AWS_REGION\", \"value\": \"${var.region}\"}, {\"name\": \"DB_HOST\", \"value\": \"${aws_db_instance.app.address}\"}, {\"name\": \"DB_USER\", \"value\": \"kiss\"}, {\"name\": \"BETTER_AUTH_URL\", \"value\": \"https://${aws_cloudfront_distribution.app.domain_name}\"}, {\"name\": \"INSTALLATION_ID\", \"value\": \"${var.installation_id}\"}, {\"name\": \"BOOTSTRAP_SECRET_ARN\", \"value\": \"${aws_secretsmanager_secret.claim.arn}\"}, {\"name\": \"BEDROCK_MODEL\", \"value\": \"au.anthropic.claude-sonnet-4-6\"}], \"secrets\": [{\"name\": \"BETTER_AUTH_SECRET\", \"valueFrom\": \"${aws_secretsmanager_secret.runtime.arn}:BETTER_AUTH_SECRET::\"}, {\"name\": \"APP_ENCRYPTION_KEY\", \"valueFrom\": \"${aws_secretsmanager_secret.runtime.arn}:APP_ENCRYPTION_KEY::\"}, {\"name\": \"HERMES_MANAGER_TOKEN\", \"valueFrom\": \"${aws_secretsmanager_secret.runtime.arn}:HERMES_MANAGER_TOKEN::\"}, {\"name\": \"DB_PASSWORD\", \"valueFrom\": \"${aws_db_instance.app.master_user_secret[0].secret_arn}:password::\"}], \"mountPoints\": [{\"sourceVolume\": \"tmp-web\", \"containerPath\": \"/tmp\", \"readOnly\": false}], \"logConfiguration\": {\"logDriver\": \"awslogs\", \"options\": {\"awslogs-group\": \"${aws_cloudwatch_log_group.app.name}\", \"awslogs-region\": \"${var.region}\", \"awslogs-stream-prefix\": \"web\"}}, \"portMappings\": [{\"containerPort\": 3000, \"protocol\": \"tcp\"}]}, {\"name\": \"worker\", \"image\": \"${var.container_image}\", \"essential\": true, \"command\": [\"node\", \"dist/worker.js\"], \"user\": \"10000:10000\", \"readonlyRootFilesystem\": true, \"environment\": [{\"name\": \"AWS_REGION\", \"value\": \"${var.region}\"}, {\"name\": \"DB_HOST\", \"value\": \"${aws_db_instance.app.address}\"}, {\"name\": \"DB_USER\", \"value\": \"kiss\"}, {\"name\": \"BETTER_AUTH_URL\", \"value\": \"https://${aws_cloudfront_distribution.app.domain_name}\"}, {\"name\": \"INSTALLATION_ID\", \"value\": \"${var.installation_id}\"}, {\"name\": \"BOOTSTRAP_SECRET_ARN\", \"value\": \"${aws_secretsmanager_secret.claim.arn}\"}, {\"name\": \"BEDROCK_MODEL\", \"value\": \"au.anthropic.claude-sonnet-4-6\"}], \"secrets\": [{\"name\": \"BETTER_AUTH_SECRET\", \"valueFrom\": \"${aws_secretsmanager_secret.runtime.arn}:BETTER_AUTH_SECRET::\"}, {\"name\": \"APP_ENCRYPTION_KEY\", \"valueFrom\": \"${aws_secretsmanager_secret.runtime.arn}:APP_ENCRYPTION_KEY::\"}, {\"name\": \"HERMES_MANAGER_TOKEN\", \"valueFrom\": \"${aws_secretsmanager_secret.runtime.arn}:HERMES_MANAGER_TOKEN::\"}, {\"name\": \"DB_PASSWORD\", \"valueFrom\": \"${aws_db_instance.app.master_user_secret[0].secret_arn}:password::\"}], \"mountPoints\": [{\"sourceVolume\": \"tmp-worker\", \"containerPath\": \"/tmp\", \"readOnly\": false}], \"logConfiguration\": {\"logDriver\": \"awslogs\", \"options\": {\"awslogs-group\": \"${aws_cloudwatch_log_group.app.name}\", \"awslogs-region\": \"${var.region}\", \"awslogs-stream-prefix\": \"worker\"}}}, {\"name\": \"hermes\", \"image\": \"${var.container_image}\", \"essential\": true, \"command\": [\"/opt/hermes/.venv/bin/python\", \"runtime/manager.py\"], \"user\": \"10000:10000\", \"readonlyRootFilesystem\": true, \"environment\": [{\"name\": \"AWS_REGION\", \"value\": \"${var.region}\"}, {\"name\": \"DB_HOST\", \"value\": \"${aws_db_instance.app.address}\"}, {\"name\": \"DB_USER\", \"value\": \"kiss\"}, {\"name\": \"BETTER_AUTH_URL\", \"value\": \"https://${aws_cloudfront_distribution.app.domain_name}\"}, {\"name\": \"INSTALLATION_ID\", \"value\": \"${var.installation_id}\"}, {\"name\": \"BOOTSTRAP_SECRET_ARN\", \"value\": \"${aws_secretsmanager_secret.claim.arn}\"}, {\"name\": \"BEDROCK_MODEL\", \"value\": \"au.anthropic.claude-sonnet-4-6\"}], \"secrets\": [{\"name\": \"BETTER_AUTH_SECRET\", \"valueFrom\": \"${aws_secretsmanager_secret.runtime.arn}:BETTER_AUTH_SECRET::\"}, {\"name\": \"APP_ENCRYPTION_KEY\", \"valueFrom\": \"${aws_secretsmanager_secret.runtime.arn}:APP_ENCRYPTION_KEY::\"}, {\"name\": \"HERMES_MANAGER_TOKEN\", \"valueFrom\": \"${aws_secretsmanager_secret.runtime.arn}:HERMES_MANAGER_TOKEN::\"}, {\"name\": \"DB_PASSWORD\", \"valueFrom\": \"${aws_db_instance.app.master_user_secret[0].secret_arn}:password::\"}], \"mountPoints\": [{\"sourceVolume\": \"tmp-hermes\", \"containerPath\": \"/tmp\", \"readOnly\": false}, {\"sourceVolume\": \"profiles\", \"containerPath\": \"/data\", \"readOnly\": false}], \"logConfiguration\": {\"logDriver\": \"awslogs\", \"options\": {\"awslogs-group\": \"${aws_cloudwatch_log_group.app.name}\", \"awslogs-region\": \"${var.region}\", \"awslogs-stream-prefix\": \"hermes\"}}}]",
+        "volume": [
+          {
+            "name": "profiles",
+            "efs_volume_configuration": {
+              "file_system_id": "${aws_efs_file_system.profiles.id}",
+              "transit_encryption": "ENABLED",
+              "authorization_config": {
+                "access_point_id": "${aws_efs_access_point.profiles.id}",
+                "iam": "ENABLED"
+              }
+            }
+          },
+          {
+            "name": "tmp-web"
+          },
+          {
+            "name": "tmp-worker"
+          },
+          {
+            "name": "tmp-hermes"
+          }
+        ]
+      }
+    },
+    "aws_ecs_service": {
+      "app": {
+        "count": "${var.enable_service ? 1 : 0}",
+        "name": "${var.name}",
+        "cluster": "${aws_ecs_cluster.app.id}",
+        "task_definition": "${aws_ecs_task_definition.app.arn}",
+        "desired_count": 1,
+        "launch_type": "FARGATE",
+        "deployment_minimum_healthy_percent": 0,
+        "deployment_maximum_percent": 100,
+        "health_check_grace_period_seconds": 180,
+        "network_configuration": {
+          "subnets": "${aws_subnet.private[*].id}",
+          "security_groups": [
+            "${aws_security_group.web.id}"
+          ],
+          "assign_public_ip": false
+        },
+        "load_balancer": {
+          "target_group_arn": "${aws_lb_target_group.app.arn}",
+          "container_name": "web",
+          "container_port": 3000
+        },
+        "depends_on": [
+          "aws_lb_listener.app",
+          "aws_efs_mount_target.profiles"
+        ],
+        "deployment_circuit_breaker": {
+          "enable": true,
+          "rollback": true
+        }
+      }
+    },
+    "aws_route": {
+      "public": {
+        "gateway_id": "${aws_internet_gateway.app.id}",
+        "destination_cidr_block": "0.0.0.0/0",
+        "route_table_id": "${aws_route_table.public.id}"
+      },
+      "private": {
+        "nat_gateway_id": "${aws_nat_gateway.app.id}",
+        "destination_cidr_block": "0.0.0.0/0",
+        "route_table_id": "${aws_route_table.private.id}"
+      }
+    }
+  },
+  "output": {
+    "url": {
+      "value": "https://${aws_cloudfront_distribution.app.domain_name}"
+    },
+    "cluster": {
+      "value": "${aws_ecs_cluster.app.name}"
+    },
+    "task_definition": {
+      "value": "${aws_ecs_task_definition.app.arn}"
+    },
+    "subnets": {
+      "value": "${aws_subnet.private[*].id}"
+    },
+    "security_group": {
+      "value": "${aws_security_group.web.id}"
+    },
+    "runtime_secret_arn": {
+      "value": "${aws_secretsmanager_secret.runtime.arn}"
+    },
+    "claim_secret_arn": {
+      "value": "${aws_secretsmanager_secret.claim.arn}"
+    },
+    "account": {
+      "value": "${data.aws_caller_identity.buyer.account_id}"
+    }
+  }
+}
