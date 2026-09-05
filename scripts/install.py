@@ -5,14 +5,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 REGION = 'ap-southeast-2'
 
 def aws(service, operation, payload=None, region=REGION):
-    command = ['aws', service, operation, '--region', region, '--output', 'json', '--no-cli-pager']
-    if payload is not None:
-        command += ['--cli-input-json', 'file:///dev/stdin']
-    result = subprocess.run(command, input=json.dumps(payload) if payload is not None else None, capture_output=True, text=True)
-    if result.returncode:
-        # Do not echo payloads: these can contain credentials or claim links.
-        raise RuntimeError(f'AWS {service} {operation} failed. Check current account permissions and CloudWatch for this installation.')
-    return json.loads(result.stdout or '{}')
+    import boto3
+    # AWS CLI refreshes login/CloudShell credentials; SDK sends payloads without files or argv secrets.
+    credentials=json.loads(subprocess.check_output(['aws','configure','export-credentials','--format','process'],text=True))
+    client=boto3.client('s3' if service=='s3api' else service,region_name=region,
+        aws_access_key_id=credentials['AccessKeyId'],aws_secret_access_key=credentials['SecretAccessKey'],
+        aws_session_token=credentials.get('SessionToken'))
+    try:
+        return getattr(client,operation.replace('-','_'))(**(payload or {}))
+    except Exception:
+        raise RuntimeError(f'AWS {service} {operation} failed. Check current account permissions and CloudWatch for this installation.') from None
 
 def terraform():
     if shutil.which('terraform'):

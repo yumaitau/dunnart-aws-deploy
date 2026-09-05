@@ -15,7 +15,7 @@ api=release['licenseInvokeArn'].rsplit('/',1)[0]
 source=f'https://github.com/yumaitau/kiss-company-aws-deploy/archive/{args.commit}.tar.gz'
 commands=['curl --fail --location --retry 3 '+source+' -o /tmp/company.tar.gz',
           'mkdir -p /tmp/company && tar -xzf /tmp/company.tar.gz --strip-components=1 -C /tmp/company',
-          'python3 /tmp/company/scripts/launch-job.py --automated']
+          'bash /tmp/company/install.sh --automated']
 buildspec=json.dumps({'version':'0.2','phases':{'build':{'commands':commands}}})
 resources={
  'BuildLogs':{'Type':'AWS::Logs::LogGroup','Properties':{'RetentionInDays':14}},
