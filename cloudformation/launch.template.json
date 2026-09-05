@@ -1,0 +1,276 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Launch your private KISS Company workspace. AWS infrastructure and AI usage billed separately. This stack creates the installer; company resources and data are retained separately in Terraform.",
+  "Parameters": {
+    "InstallationId": {
+      "Type": "String",
+      "AllowedPattern": "[a-f0-9-]{36}",
+      "Description": "Prepared automatically by KISS Company. Leave unchanged."
+    },
+    "OwnerClaimHash": {
+      "Type": "String",
+      "AllowedPattern": "[a-f0-9]{64}",
+      "Description": "Protects your owner setup. Leave unchanged."
+    }
+  },
+  "Rules": {
+    "Sydney": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Equals": [
+              {
+                "Ref": "AWS::Region"
+              },
+              "ap-southeast-2"
+            ]
+          },
+          "AssertDescription": "Launch this workspace in Sydney (ap-southeast-2)."
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "BuildLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "RetentionInDays": 14
+      }
+    },
+    "BuildRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "codebuild.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "LaunchCompany",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:*",
+                    "ecs:*",
+                    "rds:*",
+                    "elasticfilesystem:*",
+                    "elasticloadbalancing:*",
+                    "cloudfront:*",
+                    "s3:*",
+                    "logs:*",
+                    "secretsmanager:*",
+                    "cloudwatch:*"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:CreateRole",
+                    "iam:GetRole",
+                    "iam:DeleteRole",
+                    "iam:PutRolePolicy",
+                    "iam:GetRolePolicy",
+                    "iam:DeleteRolePolicy",
+                    "iam:ListRolePolicies",
+                    "iam:ListAttachedRolePolicies",
+                    "iam:TagRole",
+                    "iam:UntagRole",
+                    "iam:ListInstanceProfilesForRole"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/kiss-company-*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:PassRole"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/kiss-company-*"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "iam:PassedToService": "ecs-tasks.amazonaws.com"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:CreateServiceLinkedRole"
+                  ],
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "iam:AWSServiceName": [
+                        "ecs.amazonaws.com",
+                        "elasticloadbalancing.amazonaws.com",
+                        "rds.amazonaws.com",
+                        "cloudfront.amazonaws.com",
+                        "backup.amazonaws.com"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "execute-api:Invoke"
+                  ],
+                  "Resource": [
+                    "arn:aws:execute-api:us-east-1:959038055523:vspvcb1ld4/v1/POST/lease",
+                    "arn:aws:execute-api:us-east-1:959038055523:vspvcb1ld4/v1/POST/deployment-status",
+                    "arn:aws:execute-api:us-east-1:959038055523:vspvcb1ld4/v1/POST/connector-project"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "Build": {
+      "Type": "AWS::CodeBuild::Project",
+      "Properties": {
+        "ServiceRole": {
+          "Fn::GetAtt": [
+            "BuildRole",
+            "Arn"
+          ]
+        },
+        "ConcurrentBuildLimit": 1,
+        "TimeoutInMinutes": 120,
+        "QueuedTimeoutInMinutes": 30,
+        "Artifacts": {
+          "Type": "NO_ARTIFACTS"
+        },
+        "Source": {
+          "Type": "NO_SOURCE",
+          "BuildSpec": "{\"version\": \"0.2\", \"phases\": {\"build\": {\"commands\": [\"curl --fail --location --retry 3 https://github.com/yumaitau/kiss-company-aws-deploy/archive/65cec2172bfcde94abe2044563b6006ec46f993d.tar.gz -o /tmp/company.tar.gz\", \"mkdir -p /tmp/company && tar -xzf /tmp/company.tar.gz --strip-components=1 -C /tmp/company\", \"bash /tmp/company/install.sh --automated\"]}}}"
+        },
+        "Environment": {
+          "Type": "LINUX_CONTAINER",
+          "ComputeType": "BUILD_GENERAL1_SMALL",
+          "Image": "aws/codebuild/standard:7.0",
+          "PrivilegedMode": false
+        },
+        "LogsConfig": {
+          "CloudWatchLogs": {
+            "Status": "ENABLED",
+            "GroupName": {
+              "Ref": "BuildLogs"
+            }
+          }
+        }
+      }
+    },
+    "ProviderRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "LaunchCompany",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "codebuild:StartBuild"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "Build",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "Provider": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Runtime": "python3.13",
+        "Handler": "index.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "ProviderRole",
+            "Arn"
+          ]
+        },
+        "Timeout": 60,
+        "Environment": {
+          "Variables": {
+            "PROJECT": {
+              "Ref": "Build"
+            }
+          }
+        },
+        "Code": {
+          "ZipFile": "\"\"\"Start a buyer-owned build. CloudFormation tracks the launcher, not company data.\"\"\"\nimport hashlib, json, os, urllib.request\nimport boto3\n\ndef handler(event, context):\n    status, data = 'SUCCESS', {}\n    try:\n        if event['RequestType'] != 'Delete':\n            props = event['ResourceProperties']\n            result = boto3.client('codebuild').start_build(\n                projectName=os.environ['PROJECT'],\n                idempotencyToken=hashlib.sha256(event['RequestId'].encode()).hexdigest(),\n                environmentVariablesOverride=[\n                    {'name':'KISS_INSTALLATION_ID','value':props['InstallationId'],'type':'PLAINTEXT'},\n                    {'name':'OWNER_CLAIM_HASH','value':props['OwnerClaimHash'],'type':'PLAINTEXT'},\n                ])\n            data = {'BuildId':result['build']['id']}\n    except Exception:\n        status = 'FAILED'\n    # Never log the event: it contains a private CloudFormation response URL.\n    body = json.dumps({'Status':status, 'Reason':'Launcher started. Return to KISS Company for workspace progress.' if status == 'SUCCESS' else 'Could not start setup. Check the launcher permissions.',\n        'PhysicalResourceId':event.get('PhysicalResourceId', 'kiss-company-launcher'),\n        'StackId':event['StackId'], 'RequestId':event['RequestId'],\n        'LogicalResourceId':event['LogicalResourceId'], 'Data':data}).encode()\n    request = urllib.request.Request(event['ResponseURL'],data=body,headers={'Content-Type':''},method='PUT')\n    with urllib.request.urlopen(request, timeout=20): pass\n"
+        }
+      }
+    },
+    "Start": {
+      "Type": "Custom::CompanyLaunch",
+      "Properties": {
+        "ServiceToken": {
+          "Fn::GetAtt": [
+            "Provider",
+            "Arn"
+          ]
+        },
+        "InstallationId": {
+          "Ref": "InstallationId"
+        },
+        "OwnerClaimHash": {
+          "Ref": "OwnerClaimHash"
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "SetupPage": {
+      "Value": "https://vspvcb1ld4.execute-api.us-east-1.amazonaws.com/v1/setup",
+      "Description": "Return here to watch setup and open your workspace."
+    },
+    "BuildId": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Start",
+          "BuildId"
+        ]
+      },
+      "Description": "Installer job. Stack completion means the installer started; workspace readiness appears on your setup page."
+    }
+  }
+}
